@@ -1,5 +1,5 @@
 import logging
-
+import os
 from dotenv import load_dotenv
 
 from livekit.agents import (
@@ -17,6 +17,74 @@ from livekit.agents import (
 from livekit.agents.llm import function_tool
 from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
+
+import re
+from typing import Optional, Iterable
+
+
+class InterruptionHandler:
+    """
+    Decide whether a transcription should interrupt the agent.
+
+    - If the agent is not speaking: always interrupt (any speech is valid).
+    - If the agent is speaking:
+      - Always interrupt if text contains explicit interrupt words (stop, pause, etc.).
+      - Ignore if all words are in the ignored filler list.
+      - Interrupt if there is at least one non-filler word.
+    """
+
+    def __init__(
+        self,
+        ignored_words: Iterable[str],
+        interrupt_words: Iterable[str],
+        min_non_filler_chars: int = 2,
+    ) -> None:
+        # Normalized filler list (words to ignore)
+        self.ignored = {w.strip().lower() for w in ignored_words if w.strip()}
+        # Normalized interrupt words (words that always trigger interruption)
+        self.interrupt = {w.strip().lower() for w in interrupt_words if w.strip()}
+        self.min_non_filler_chars = min_non_filler_chars
+
+    def should_interrupt(
+        self,
+        text: str,
+        agent_is_speaking: bool,
+    ) -> bool:
+        """
+        Return True if this transcription should interrupt the agent.
+        """
+
+        # If agent is not speaking, ANY speech is considered valid.
+        if not agent_is_speaking:
+            return True
+
+        # Basic "low-confidence" / noise heuristic when confidence is not available:
+        # treat extremely short transcripts as background murmur.
+        normalized = text.strip()
+        if len(normalized) < self.min_non_filler_chars:
+            return False
+
+        # Tokenize into alphabetic words
+        words = re.findall(r"[a-zA-Z]+", normalized.lower())
+
+        if not words:
+            # No recognizable words -> treat as noise
+            return False
+
+        # Check for explicit interrupt words first (stop, pause, etc.)
+        for w in words:
+            if w in self.interrupt:
+                return True  # Always interrupt on these words
+
+        # If there is at least one non-filler word, treat this as a real interruption.
+        for w in words:
+            if w not in self.ignored:
+                return True
+
+        # All words are fillers from the ignored list -> ignore.
+        return False
+
 
 # uncomment to enable Krisp background voice/noise cancellation
 # from livekit.plugins import noise_cancellation
@@ -100,7 +168,30 @@ async def entrypoint(ctx: JobContext):
         # when it's detected, you may resume the agent's speech
         resume_false_interruption=True,
         false_interruption_timeout=1.0,
+        # Increase minimum interruption duration to filter very short audio (like "um", "ah")
+        min_interruption_duration=0.8,
+        # Require at least one word to be recognized before interrupting
+        min_interruption_words=1,
+        # allow_interruptions=False,
     )
+
+    # Load filler words to ignore from environment variable
+    ignored_fillers_env = os.getenv(
+        "IGNORED_FILLERS", "uh,umm,hmm,haan,um,ah,er,like,yeah,mhm,mm"
+    )
+    ignored_fillers = [w.strip() for w in ignored_fillers_env.split(",") if w.strip()]
+
+    # Load explicit interrupt words from environment variable
+    interrupt_words_env = os.getenv("INTERRUPT_WORDS", "stop,pause,wait,hold,hold on")
+    interrupt_words = [w.strip() for w in interrupt_words_env.split(",") if w.strip()]
+
+    handler = InterruptionHandler(
+        ignored_words=ignored_fillers,
+        interrupt_words=interrupt_words,
+        min_non_filler_chars=2,
+    )
+
+    agent_is_speaking = False
 
     # log metrics as they are emitted, and total usage after session is over
     usage_collector = metrics.UsageCollector()
@@ -109,6 +200,27 @@ async def entrypoint(ctx: JobContext):
     def _on_metrics_collected(ev: MetricsCollectedEvent):
         metrics.log_metrics(ev.metrics)
         usage_collector.collect(ev.metrics)
+
+    @session.on("agent_state_changed")
+    def _on_agent_state_changed(ev):
+        nonlocal agent_is_speaking
+        if ev.new_state == "speaking":
+            agent_is_speaking = True
+        else:
+            agent_is_speaking = False
+
+    @session.on("user_input_transcribed")
+    def _on_user_input_transcribed(ev):
+        text = ev.transcript
+        is_final = ev.is_final
+
+        print(f"[{'FINAL' if is_final else 'INTERIM'}] Transcript: '{text}'")
+
+        if handler.should_interrupt(text, agent_is_speaking):
+            print("INTERRUPTED (valid interruption)")
+            session.interrupt()
+        else:
+            print("IGNORED (filler word or noise)")
 
     async def log_usage():
         summary = usage_collector.get_summary()
