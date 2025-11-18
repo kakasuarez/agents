@@ -9,6 +9,179 @@
 <!--END_BANNER_IMAGE-->
 <br />
 
+---
+
+## 🎯 Custom Interruption Handler Feature
+
+> **Demo Video:** [https://youtu.be/NKz8Cdc3zmo]
+
+This repository includes an enhanced interruption handling system that intelligently distinguishes between filler words (um, uh, hmm) and real speech, preventing false interruptions while maintaining natural conversation flow.
+
+### What Changed
+
+**New Modules & Components:**
+
+- `InterruptionHandler` class in `examples/voice_agents/basic_agent.py`
+  - Configurable filler word detection
+  - Dynamic word list management API
+  - Smart interruption logic based on transcript content
+
+**Key Parameters:**
+
+- `ignored_words`: List of filler words to ignore during agent speech (default: "uh,umm,hmm,haan,um,ah,er,like,yeah,mhm,mm,mhmm")
+- `min_non_filler_chars`: Minimum character threshold to prevent noise detection (default: 2)
+- `min_interruption_duration`: Set to 5.0s to effectively disable VAD auto-interrupts
+- `min_interruption_words`: Set to 5 to prevent premature interruption commits
+
+**Logic Additions:**
+
+- Manual interruption control via interim transcript analysis
+- Filler-only input filtering in `on_user_turn_completed` to prevent empty LLM requests
+- Event-based state tracking (`agent_is_speaking`, user states)
+- Proper logging infrastructure using Python logger
+
+### What Works
+
+✅ **Verified Features:**
+
+- Filler word detection prevents false interruptions during agent speech
+- Real speech (non-filler words) correctly triggers interruptions
+- Dynamic word list updates via programmatic methods (not voice commands)
+- Environment variable configuration for word lists
+- Short utterances and noise filtered out effectively
+- LLM doesn't receive filler-only input, saving tokens and improving responses
+- Proper logging of all interruption decisions and state changes
+
+### Known Issues
+
+⚠️ **Edge Cases & Limitations:**
+
+- Very fast speakers may still trigger false interruptions if words blend together
+- Filler words at sentence boundaries (e.g., "um, I want pizza") still count the "I want pizza" part
+- Network latency may cause delay between user speech and interruption execution
+
+### Steps to Test
+
+**1. Environment Setup:**
+
+```bash
+# Clone the repository
+git clone <repo-url>
+cd agents
+
+# Install dependencies
+pip install -e "livekit-agents[openai,silero,deepgram,cartesia,turn-detector]"
+
+# Set environment variables
+export DEEPGRAM_API_KEY=your_key_here
+export OPENAI_API_KEY=your_key_here
+export LIVEKIT_URL=your_livekit_url
+export LIVEKIT_API_KEY=your_api_key
+export LIVEKIT_API_SECRET=your_api_secret
+
+# Optional: Configure filler words
+export IGNORED_FILLERS="uh,umm,hmm,haan,um,ah,er,like,yeah,mhm,mm,mhmm"
+```
+
+**2. Run the Agent:**
+
+```bash
+# Terminal testing mode (local audio)
+python examples/voice_agents/basic_agent.py console
+
+# Development mode (with LiveKit server)
+python examples/voice_agents/basic_agent.py dev
+
+# Production mode
+python examples/voice_agents/basic_agent.py start
+```
+
+**3. Test Scenarios:**
+
+**A. Filler Word Test:**
+
+- Start the agent and let it speak
+- While agent is speaking, say only filler words: "um", "uh", "hmm"
+- **Expected:** Agent continues speaking (no interruption)
+- **Check logs:** Look for `"→ Ignoring (filler word)"` messages
+
+**B. Real Speech Test:**
+
+- Start the agent and let it speak
+- While agent is speaking, say real words: "stop", "wait", or "tell me about weather"
+- **Expected:** Agent stops immediately and listens
+- **Check logs:** Look for `"→ Interrupting (valid speech)"` messages
+
+**C. Mixed Speech Test:**
+
+- While agent speaks, say: "um, wait, uh, I have a question"
+- **Expected:** Agent interrupts on first non-filler word ("wait")
+
+**D. Filler-Only Input Test:**
+
+- When agent finishes speaking, say only: "um... uh... hmm"
+- **Expected:** Agent doesn't generate a response
+- **Check logs:** Look for `"Ignoring filler-only input"` message
+
+**4. Dynamic Updates Test (Programmatic):**
+
+```python
+# In your code, after creating the agent:
+agent_instance.update_handler_words(
+    ignored_words=["uh", "um", "er", "basically"]
+)
+
+# Or direct handler updates:
+handler.add_ignored_word("whatever")
+handler.remove_ignored_word("hmm")
+```
+
+### Environment Details
+
+**Python Version:**
+
+- Python 3.10 or higher recommended
+- Tested on Python 3.10, 3.11, 3.12
+
+**Core Dependencies:**
+
+```toml
+livekit-agents >= 1.0.0
+livekit-plugins-openai
+livekit-plugins-deepgram
+livekit-plugins-cartesia
+livekit-plugins-silero
+livekit-plugins-turn-detector
+python-dotenv
+```
+
+**Configuration Files:**
+
+- `.env` - Environment variables for API keys and word lists
+- `pyproject.toml` - Project dependencies and metadata
+
+**Runtime Configuration:**
+Set these environment variables before running:
+
+```bash
+# Required for basic functionality
+DEEPGRAM_API_KEY=<your_deepgram_key>
+OPENAI_API_KEY=<your_openai_key>
+LIVEKIT_URL=<your_livekit_url>
+LIVEKIT_API_KEY=<your_api_key>
+LIVEKIT_API_SECRET=<your_secret>
+
+# Optional: Custom filler words (comma-separated)
+IGNORED_FILLERS="uh,um,hmm,er,like,yeah"
+```
+
+**Additional Documentation:**
+
+- See `examples/voice_agents/DYNAMIC_WORD_LISTS.md` for security guide on dynamic updates
+- See `examples/voice_agents/dynamic_word_lists_example.py` for code examples
+
+---
+
 ![PyPI - Version](https://img.shields.io/pypi/v/livekit-agents)
 [![PyPI Downloads](https://static.pepy.tech/badge/livekit-agents/month)](https://pepy.tech/projects/livekit-agents)
 [![Slack community](https://img.shields.io/endpoint?url=https%3A%2F%2Flivekit.io%2Fbadges%2Fslack)](https://livekit.io/join-slack)
@@ -341,6 +514,7 @@ python myagent.py dev
 Starts the agent server and enables hot reloading when files change. This mode allows each process to host multiple concurrent agents efficiently.
 
 The agent connects to LiveKit Cloud or your self-hosted server. Set the following environment variables:
+
 - LIVEKIT_URL
 - LIVEKIT_API_KEY
 - LIVEKIT_API_SECRET
@@ -361,7 +535,9 @@ Runs the agent with production-ready optimizations.
 The Agents framework is under active development in a rapidly evolving field. We welcome and appreciate contributions of any kind, be it feedback, bugfixes, features, new plugins and tools, or better documentation. You can file issues under this repo, open a PR, or chat with us in LiveKit's [Slack community](https://livekit.io/join-slack).
 
 <!--BEGIN_REPO_NAV-->
+
 <br/><table>
+
 <thead><tr><th colspan="2">LiveKit Ecosystem</th></tr></thead>
 <tbody>
 <tr><td>LiveKit SDKs</td><td><a href="https://github.com/livekit/client-sdk-js">Browser</a> · <a href="https://github.com/livekit/client-sdk-swift">iOS/macOS/visionOS</a> · <a href="https://github.com/livekit/client-sdk-android">Android</a> · <a href="https://github.com/livekit/client-sdk-flutter">Flutter</a> · <a href="https://github.com/livekit/client-sdk-react-native">React Native</a> · <a href="https://github.com/livekit/rust-sdks">Rust</a> · <a href="https://github.com/livekit/node-sdks">Node.js</a> · <a href="https://github.com/livekit/python-sdks">Python</a> · <a href="https://github.com/livekit/client-sdk-unity">Unity</a> · <a href="https://github.com/livekit/client-sdk-unity-web">Unity (WebGL)</a> · <a href="https://github.com/livekit/client-sdk-esp32">ESP32</a></td></tr><tr></tr>
