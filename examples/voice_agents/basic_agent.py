@@ -168,9 +168,10 @@ async def entrypoint(ctx: JobContext):
         # when it's detected, you may resume the agent's speech
         resume_false_interruption=True,
         false_interruption_timeout=1.0,
-        # Increase minimum interruption duration to filter very short audio (like "um", "ah")
-        min_interruption_duration=0.8,
-        # Require at least one word to be recognized before interrupting
+        # Set high min_interruption_duration to prevent automatic VAD-based interruptions
+        # We'll manually control interruptions via the user_input_transcribed handler
+        min_interruption_duration=999.0,  # Very high to disable auto-interrupt
+        # Require at least 1 word - interruptions will only happen via transcripts
         min_interruption_words=1,
         # allow_interruptions=False,
     )
@@ -204,23 +205,42 @@ async def entrypoint(ctx: JobContext):
     @session.on("agent_state_changed")
     def _on_agent_state_changed(ev):
         nonlocal agent_is_speaking
+        print(f"[AGENT STATE] {ev.old_state} → {ev.new_state}")
         if ev.new_state == "speaking":
             agent_is_speaking = True
         else:
             agent_is_speaking = False
+
+    @session.on("user_state_changed")
+    def _on_user_state_changed(ev):
+        print(
+            f"[USER STATE] {ev.old_state} → {ev.new_state} (agent_is_speaking={agent_is_speaking})"
+        )
 
     @session.on("user_input_transcribed")
     def _on_user_input_transcribed(ev):
         text = ev.transcript
         is_final = ev.is_final
 
-        print(f"[{'FINAL' if is_final else 'INTERIM'}] Transcript: '{text}'")
+        print(
+            f"[{'FINAL' if is_final else 'INTERIM'}] Transcript: '{text}' (agent_is_speaking={agent_is_speaking})"
+        )
 
-        if handler.should_interrupt(text, agent_is_speaking):
-            print("INTERRUPTED (valid interruption)")
-            session.interrupt()
+        # Only process interim transcripts for real-time interruptions
+        # Final transcripts are processed for end-of-turn logic
+        if not is_final:
+            if handler.should_interrupt(text, agent_is_speaking):
+                print("  → INTERRUPTED (valid interruption)")
+                session.interrupt()
+            else:
+                print("  → IGNORED (filler word or noise)")
         else:
-            print("IGNORED (filler word or noise)")
+            # For final transcripts, show what would have happened
+            if agent_is_speaking:
+                if handler.should_interrupt(text, agent_is_speaking):
+                    print("  → (would have interrupted if this was interim)")
+                else:
+                    print("  → (filler detected - wouldn't interrupt)")
 
     async def log_usage():
         summary = usage_collector.get_summary()
