@@ -139,14 +139,14 @@ class MyAgent(Agent):
         normalized = user_text.strip()
 
         if len(normalized) < self.handler.min_non_filler_chars:
-            print(f"[AGENT] Ignoring too-short input: '{user_text}'")
+            logger.info(f"Ignoring too-short input: '{user_text}'")
             raise StopResponse()
 
         # Tokenize into alphabetic words
         words = re.findall(r"[a-zA-Z]+", normalized.lower())
 
         if not words:
-            print(f"[AGENT] Ignoring non-word input: '{user_text}'")
+            logger.info(f"Ignoring non-word input: '{user_text}'")
             raise StopResponse()
 
         # Check if ALL words are fillers
@@ -157,7 +157,7 @@ class MyAgent(Agent):
                 break
 
         if not has_non_filler:
-            print(f"[AGENT] Ignoring filler-only input: '{user_text}'")
+            logger.info(f"Ignoring filler-only input: '{user_text}'")
             raise StopResponse()
 
         # If it's a valid message, proceed with normal response generation
@@ -294,7 +294,7 @@ async def entrypoint(ctx: JobContext):
     @session.on("agent_state_changed")
     def _on_agent_state_changed(ev):
         nonlocal agent_is_speaking
-        print(f"[AGENT STATE] {ev.old_state} → {ev.new_state}")
+        logger.info(f"Agent state: {ev.old_state} → {ev.new_state}")
         if ev.new_state == "speaking":
             agent_is_speaking = True
         else:
@@ -302,8 +302,8 @@ async def entrypoint(ctx: JobContext):
 
     @session.on("user_state_changed")
     def _on_user_state_changed(ev):
-        print(
-            f"[USER STATE] {ev.old_state} → {ev.new_state} (agent_is_speaking={agent_is_speaking})"
+        logger.info(
+            f"User state: {ev.old_state} → {ev.new_state} (agent_is_speaking={agent_is_speaking})"
         )
 
     @session.on("user_input_transcribed")
@@ -311,8 +311,8 @@ async def entrypoint(ctx: JobContext):
         text = ev.transcript
         is_final = ev.is_final
 
-        print(
-            f"[{'FINAL' if is_final else 'INTERIM'}] Transcript: '{text}' (agent_is_speaking={agent_is_speaking})"
+        logger.info(
+            f"{'FINAL' if is_final else 'INTERIM'} transcript: '{text}' (agent_is_speaking={agent_is_speaking})"
         )
 
         # Process interim transcripts for manual interruption control
@@ -322,13 +322,13 @@ async def entrypoint(ctx: JobContext):
 
             if should_interrupt:
                 # Valid interruption - manually trigger it
-                print(f"  → INTERRUPTING (valid speech)")
+                logger.info(f"  → Interrupting (valid speech)")
                 session.interrupt()
             else:
                 # Filler detected - ignore
-                print(f"  → IGNORING (filler word)")
+                logger.info(f"  → Ignoring (filler word)")
         elif is_final:
-            print(f"  → FINAL")
+            logger.info(f"  → Final transcript")
 
     async def log_usage():
         summary = usage_collector.get_summary()
