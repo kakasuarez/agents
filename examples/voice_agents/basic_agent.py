@@ -29,7 +29,6 @@ class InterruptionHandler:
 
     - If the agent is not speaking: always interrupt (any speech is valid).
     - If the agent is speaking:
-      - Always interrupt if text contains explicit interrupt words (stop, pause, etc.).
       - Ignore if all words are in the ignored filler list.
       - Interrupt if there is at least one non-filler word.
     """
@@ -37,14 +36,34 @@ class InterruptionHandler:
     def __init__(
         self,
         ignored_words: Iterable[str],
-        interrupt_words: Iterable[str],
         min_non_filler_chars: int = 2,
     ) -> None:
         # Normalized filler list (words to ignore)
         self.ignored = {w.strip().lower() for w in ignored_words if w.strip()}
-        # Normalized interrupt words (words that always trigger interruption)
-        self.interrupt = {w.strip().lower() for w in interrupt_words if w.strip()}
         self.min_non_filler_chars = min_non_filler_chars
+
+    def add_ignored_word(self, word: str) -> None:
+        """Add a word to the ignored (filler) list."""
+        normalized = word.strip().lower()
+        if normalized:
+            self.ignored.add(normalized)
+            logger.info(f"Added '{word}' to ignored words list")
+
+    def remove_ignored_word(self, word: str) -> None:
+        """Remove a word from the ignored (filler) list."""
+        normalized = word.strip().lower()
+        if normalized in self.ignored:
+            self.ignored.remove(normalized)
+            logger.info(f"Removed '{word}' from ignored words list")
+
+    def update_ignored_words(self, words: Iterable[str]) -> None:
+        """Replace the entire ignored words list."""
+        self.ignored = {w.strip().lower() for w in words if w.strip()}
+        logger.info(f"Updated ignored words list: {self.ignored}")
+
+    def get_ignored_words(self) -> set[str]:
+        """Get the current ignored words list."""
+        return self.ignored.copy()
 
     def should_interrupt(
         self,
@@ -71,11 +90,6 @@ class InterruptionHandler:
         if not words:
             # No recognizable words -> treat as noise
             return False
-
-        # Check for explicit interrupt words first (stop, pause, etc.)
-        for w in words:
-            if w in self.interrupt:
-                return True  # Always interrupt on these words
 
         # If there is at least one non-filler word, treat this as a real interruption.
         for w in words:
@@ -170,6 +184,22 @@ class MyAgent(Agent):
 
         return "sunny with a temperature of 70 degrees."
 
+    def update_handler_words(
+        self,
+        ignored_words: Optional[list[str]] = None,
+    ):
+        """Programmatically update the interruption handler word lists.
+
+        This method is NOT a function_tool, so it cannot be called by the LLM
+        or triggered by user voice commands. It can only be called programmatically
+        from your application code.
+
+        Args:
+            ignored_words: New list of words to ignore (optional)
+        """
+        if ignored_words is not None:
+            self.handler.update_ignored_words(ignored_words)
+
 
 server = AgentServer()
 
@@ -187,6 +217,7 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
+
     session = AgentSession(
         # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
         # See all available models at https://docs.livekit.io/agents/models/stt/
@@ -220,15 +251,35 @@ async def entrypoint(ctx: JobContext):
     )
     ignored_fillers = [w.strip() for w in ignored_fillers_env.split(",") if w.strip()]
 
-    # Load explicit interrupt words from environment variable
-    interrupt_words_env = os.getenv("INTERRUPT_WORDS", "stop,pause,wait,hold,hold on")
-    interrupt_words = [w.strip() for w in interrupt_words_env.split(",") if w.strip()]
-
     handler = InterruptionHandler(
         ignored_words=ignored_fillers,
-        interrupt_words=interrupt_words,
         min_non_filler_chars=2,
     )
+
+    # Create the agent instance with the handler
+    agent_instance = MyAgent(handler)
+
+    # --- SAFE WAYS TO UPDATE WORD LISTS DYNAMICALLY (NOT via voice) ---
+
+    # Method 1: Update via agent method (programmatically)
+    # Example: Update based on detected user language or context
+    # agent_instance.update_handler_words(
+    #     ignored_words=["uh", "um", "er"]
+    # )
+
+    # Method 2: Direct handler updates (programmatically)
+    # handler.add_ignored_word("whatever")
+    # handler.remove_ignored_word("hmm")
+
+    # Method 3: Subscribe to room events and update based on data messages
+    # @ctx.room.on("data_received")
+    # def on_data_received(data: rtc.DataPacket):
+    #     # Only accept word list updates from trusted sources (e.g., admin dashboard)
+    #     # NOT from participant voice/chat
+    #     if data.topic == "admin_update_words":
+    #         config = json.loads(data.data)
+    #         if config.get("ignored_words"):
+    #             handler.update_ignored_words(config["ignored_words"])
 
     agent_is_speaking = False
 
@@ -287,7 +338,7 @@ async def entrypoint(ctx: JobContext):
     ctx.add_shutdown_callback(log_usage)
 
     await session.start(
-        agent=MyAgent(handler),
+        agent=agent_instance,  # Use the agent instance we created
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
