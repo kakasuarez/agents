@@ -14,7 +14,7 @@ from livekit.agents import (
     metrics,
     room_io,
 )
-from livekit.agents.llm import function_tool
+from livekit.agents.llm import function_tool, StopResponse
 from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -95,7 +95,7 @@ load_dotenv()
 
 
 class MyAgent(Agent):
-    def __init__(self) -> None:
+    def __init__(self, handler: InterruptionHandler) -> None:
         super().__init__(
             instructions="Your name is Kelly. You would interact with users via voice."
             "with that in mind keep your responses concise and to the point."
@@ -103,11 +103,51 @@ class MyAgent(Agent):
             "You are curious and friendly, and have a sense of humor."
             "you will speak english to the user",
         )
+        self.handler = handler
 
     async def on_enter(self):
         # when the agent is added to the session, it'll generate a reply
         # according to its instructions
         self.session.generate_reply()
+
+    async def on_user_turn_completed(self, turn_ctx, new_message):
+        """
+        Override to filter out filler words before they reach the LLM.
+        If the user's input is only filler words, we raise StopResponse to skip response generation.
+        """
+        # Extract text from the new message (only process string content)
+        user_text = ""
+        for content in new_message.content:
+            if isinstance(content, str):
+                user_text += content
+
+        # Check if this is only filler words
+        normalized = user_text.strip()
+
+        if len(normalized) < self.handler.min_non_filler_chars:
+            print(f"[AGENT] Ignoring too-short input: '{user_text}'")
+            raise StopResponse()
+
+        # Tokenize into alphabetic words
+        words = re.findall(r"[a-zA-Z]+", normalized.lower())
+
+        if not words:
+            print(f"[AGENT] Ignoring non-word input: '{user_text}'")
+            raise StopResponse()
+
+        # Check if ALL words are fillers
+        has_non_filler = False
+        for w in words:
+            if w not in self.handler.ignored:
+                has_non_filler = True
+                break
+
+        if not has_non_filler:
+            print(f"[AGENT] Ignoring filler-only input: '{user_text}'")
+            raise StopResponse()
+
+        # If it's a valid message, proceed with normal response generation
+        await super().on_user_turn_completed(turn_ctx, new_message)
 
     # all functions annotated with @function_tool will be passed to the LLM when this
     # agent is active
@@ -164,21 +204,19 @@ async def entrypoint(ctx: JobContext):
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=True,
-        # sometimes background noise could interrupt the agent session, these are considered false positive interruptions
-        # when it's detected, you may resume the agent's speech
-        resume_false_interruption=True,
-        false_interruption_timeout=1.0,
-        # Set high min_interruption_duration to prevent automatic VAD-based interruptions
-        # We'll manually control interruptions via the user_input_transcribed handler
-        min_interruption_duration=999.0,  # Very high to disable auto-interrupt
-        # Require at least 1 word - interruptions will only happen via transcripts
-        min_interruption_words=1,
-        # allow_interruptions=False,
+        # Interruption strategy: Disable VAD-based auto-interrupts
+        # Only allow explicit manual interrupts based on transcript validation
+        allow_interruptions=True,
+        # Significantly increase the required speech duration to effectively disable VAD auto-interrupt
+        # We'll manually control interruptions based on transcript content
+        min_interruption_duration=5.0,  # Very high - VAD won't auto-interrupt for normal speech
+        min_interruption_words=5,  # Very high - system won't auto-commit interruptions
+        resume_false_interruption=False,  # We'll handle everything manually
     )
 
     # Load filler words to ignore from environment variable
     ignored_fillers_env = os.getenv(
-        "IGNORED_FILLERS", "uh,umm,hmm,haan,um,ah,er,like,yeah,mhm,mm"
+        "IGNORED_FILLERS", "uh,umm,hmm,haan,um,ah,er,like,yeah,mhm,mm,mhmm"
     )
     ignored_fillers = [w.strip() for w in ignored_fillers_env.split(",") if w.strip()]
 
@@ -226,21 +264,20 @@ async def entrypoint(ctx: JobContext):
             f"[{'FINAL' if is_final else 'INTERIM'}] Transcript: '{text}' (agent_is_speaking={agent_is_speaking})"
         )
 
-        # Only process interim transcripts for real-time interruptions
-        # Final transcripts are processed for end-of-turn logic
-        if not is_final:
-            if handler.should_interrupt(text, agent_is_speaking):
-                print("  → INTERRUPTED (valid interruption)")
+        # Process interim transcripts for manual interruption control
+        if not is_final and agent_is_speaking:
+            # Check if this transcript should trigger an interruption
+            should_interrupt = handler.should_interrupt(text, agent_is_speaking=True)
+
+            if should_interrupt:
+                # Valid interruption - manually trigger it
+                print(f"  → INTERRUPTING (valid speech)")
                 session.interrupt()
             else:
-                print("  → IGNORED (filler word or noise)")
-        else:
-            # For final transcripts, show what would have happened
-            if agent_is_speaking:
-                if handler.should_interrupt(text, agent_is_speaking):
-                    print("  → (would have interrupted if this was interim)")
-                else:
-                    print("  → (filler detected - wouldn't interrupt)")
+                # Filler detected - ignore
+                print(f"  → IGNORING (filler word)")
+        elif is_final:
+            print(f"  → FINAL")
 
     async def log_usage():
         summary = usage_collector.get_summary()
@@ -250,7 +287,7 @@ async def entrypoint(ctx: JobContext):
     ctx.add_shutdown_callback(log_usage)
 
     await session.start(
-        agent=MyAgent(),
+        agent=MyAgent(handler),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
